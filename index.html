@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32 Web Server</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--fg:#1c2330;--mut:#667085;--acc:#0b7a75;--bd:#e3e6eb}
+  @media (prefers-color-scheme:dark){:root{--bg:#12161c;--card:#1b212a;--fg:#e8ecf2;--mut:#98a2b3;--acc:#3ccfc6;--bd:#2a323d}}
+  *{box-sizing:border-box}
+  body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
+  main{max-width:760px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--mut);margin:0 0 16px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}
+  .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .v{font-size:24px;font-weight:600;margin-top:2px}
+  button{margin-top:8px;padding:8px 14px;border-radius:8px;border:1px solid var(--acc);background:var(--acc);color:#fff;font:inherit;cursor:pointer}
+  button.off{background:transparent;color:var(--acc)}
+  canvas{width:100%;height:140px;display:block}
+  #log{font:12px ui-monospace,monospace;color:var(--mut);white-space:pre-wrap;max-height:110px;overflow:auto}
+</style>
+</head>
+<body>
+<main>
+  <h1>ESP32 Embedded Web Server</h1>
+  <p class="sub" style="color:#b54708">Simulation mode: no hardware, API is mocked in the browser.</p>
+  <p class="sub" id="conn">Connecting…</p>
+  <div class="grid">
+    <div class="card"><div class="k">Temperature</div><div class="v" id="temp">–</div></div>
+    <div class="card"><div class="k">Humidity</div><div class="v" id="hum">–</div></div>
+    <div class="card"><div class="k">Uptime</div><div class="v" id="up">–</div></div>
+    <div class="card"><div class="k">Free heap</div><div class="v" id="heap">–</div></div>
+    <div class="card"><div class="k">Wi-Fi RSSI</div><div class="v" id="rssi">–</div></div>
+    <div class="card"><div class="k">LED</div><div class="v" id="led">–</div><button id="btn">Toggle</button></div>
+  </div>
+  <div class="card" style="margin-top:12px"><div class="k">Temperature history (°C)</div><canvas id="chart"></canvas></div>
+  <div class="card" style="margin-top:12px"><div class="k">Request log</div><div id="log"></div></div>
+</main>
+<script>
+// Software-only ESP32 simulator: replaces window.fetch for /api/* so the real
+// dashboard (firmware/data/index.html) runs in any browser with no hardware.
+(function () {
+  const t0 = Date.now();
+  let led = false;
+  const json = (o, status = 200) =>
+    Promise.resolve(new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json' } }));
+  const temp = () => 26 + 3 * Math.sin((Date.now() - t0) / 20000) + (Math.random() - 0.5) * 0.2;
+  const hum = () => 55 + 10 * Math.cos((Date.now() - t0) / 30000);
+  const realFetch = window.fetch.bind(window);
+
+  window.fetch = function (url, opts = {}) {
+    const method = (opts.method || 'GET').toUpperCase();
+    if (url === '/api/status' && method === 'GET')
+      return json({ uptime_s: Math.floor((Date.now() - t0) / 1000), free_heap: 214000 - Math.floor(Math.random() * 3000),
+                    rssi: -58 - Math.floor(Math.random() * 6), temperature: temp(), led });
+    if (url === '/api/sensor' && method === 'GET') return json({ temperature: temp(), humidity: hum() });
+    if (url === '/api/wifi' && method === 'GET') return json({ ssid: 'SimNet', ip: '192.168.4.1', rssi: -60 });
+    if (url === '/api/led' && method === 'POST') {
+      try {
+        const b = JSON.parse(opts.body);
+        if (typeof b.on !== 'boolean') throw 0;
+        led = b.on;
+        return json({ led });
+      } catch (e) { return json({ error: 'body must be {"on":true|false}' }, 400); }
+    }
+    if (String(url).startsWith('/api/')) return json({ error: 'not found' }, 404);
+    return realFetch(url, opts);
+  };
+})();
+
+</script>
+<script>
+const $=id=>document.getElementById(id), hist=[]; let ledOn=false;
+const log=m=>{const l=$('log');l.textContent=new Date().toLocaleTimeString()+'  '+m+'\n'+l.textContent.split('\n').slice(0,40).join('\n')};
+const fmt=s=>{const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h+'h '+m+'m '+(s%60)+'s'};
+
+async function poll(){
+  try{
+    const [s,n]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/sensor').then(r=>r.json())]);
+    $('temp').textContent=s.temperature.toFixed(1)+' °C';
+    $('hum').textContent=n.humidity.toFixed(0)+' %';
+    $('up').textContent=fmt(s.uptime_s);
+    $('heap').textContent=(s.free_heap/1024).toFixed(0)+' KB';
+    $('rssi').textContent=s.rssi+' dBm';
+    ledOn=s.led; $('led').textContent=ledOn?'ON':'OFF'; $('btn').className=ledOn?'':'off';
+    $('conn').textContent='Connected · updated '+new Date().toLocaleTimeString();
+    hist.push(s.temperature); if(hist.length>60)hist.shift(); draw();
+  }catch(e){$('conn').textContent='Disconnected – retrying…'; log('poll failed: '+e.message)}
+}
+$('btn').onclick=async()=>{
+  const r=await fetch('/api/led',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:!ledOn})});
+  log('POST /api/led -> '+r.status); poll();
+};
+function draw(){
+  const c=$('chart'),dpr=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
+  c.width=w*dpr;c.height=h*dpr;const x=c.getContext('2d');x.scale(dpr,dpr);
+  const lo=Math.min(...hist)-1,hi=Math.max(...hist)+1;
+  x.strokeStyle=getComputedStyle(document.body).getPropertyValue('--acc')||'#0b7a75';x.lineWidth=2;x.beginPath();
+  hist.forEach((v,i)=>{const px=i/(59)*w,py=h-(v-lo)/(hi-lo)*h;i?x.lineTo(px,py):x.moveTo(px,py)});x.stroke();
+}
+poll(); setInterval(poll,2000);
+</script>
+</body>
+</html>
